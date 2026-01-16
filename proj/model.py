@@ -23,20 +23,22 @@ class RiverChannel:
         self.children = []
         self.oxbows = []
         
-        # PARAMETRY
         self.k_mig = 1.0
         self.friction = 0.05
         self.current_time = 0.0
         
-        # Pamięć generalnego kierunku rzeki (kluczowe dla kształtu wachlarza)
         self.general_direction = np.array([1.0, 0.0])
+
+        self.sea_level_x = 2200
+        self.entered_sea_time = None
+
+
 
     def grow_downstream(self, growth_speed=3.0):
         """Wydłuża rzekę zgodnie z jej unikalnym kierunkiem (wachlarz)."""
         if not self.is_active or len(self.points) < 1:
             return
 
-        # 1. Obliczamy lokalny wektor na końcu rzeki
         lookback = min(len(self.points), 5)
         if lookback < 2:
             local_dir = self.general_direction.copy()
@@ -48,7 +50,6 @@ class RiverChannel:
             else:
                 local_dir = self.general_direction.copy()
 
-        # 2. Szum (lekkie meandrowanie podczas wzrostu)
         angle_change = np.random.normal(0, 0.08) 
         c, s = np.cos(angle_change), np.sin(angle_change)
         
@@ -56,42 +57,76 @@ class RiverChannel:
         noisy_dir_y = local_dir[0] * s + local_dir[1] * c
         noisy_dir = np.array([noisy_dir_x, noisy_dir_y])
         
-        # 3. Bias ciągnie w stronę GENERALNEGO KIERUNKU tej konkretnej gałęzi
-        bias_strength = 0.2
-        
+        bias_strength = 0.35 + 0.15 * (self.width / 100.0)
+        bias_strength = min(bias_strength, 0.45)
+
+                
         final_dir = noisy_dir * (1.0 - bias_strength) + self.general_direction * bias_strength
         final_dir /= (np.linalg.norm(final_dir) + 1e-6)
 
-        new_point = self.points[-1] + final_dir * growth_speed
+        if self.points[-1, 0] > self.sea_level_x - 300:
+            final_dir[0] = abs(final_dir[0])
+            final_dir /= np.linalg.norm(final_dir) + 1e-6
+
+
+        speed = growth_speed * (self.width / 100.0)
+        speed = max(1.2, speed)
+
+        new_point = self.points[-1] + final_dir * speed
+
+        if self.entered_sea_time is None and new_point[0] > self.sea_level_x:
+            self.entered_sea_time = self.current_time
+
         self.points = np.vstack([self.points, new_point])
+
+        alpha = 0.05
+        self.general_direction = (
+            (1 - alpha) * self.general_direction + alpha * final_dir
+        )
+        self.general_direction /= np.linalg.norm(self.general_direction) + 1e-6
+
 
     def migrate(self):
         """Fizyczna migracja meandrów (zgodnie z artykułem Paris et al.)."""
         if not self.is_active or len(self.points) < 10:
             return
+        if self.points[-1, 0] > self.sea_level_x:
+            if self.entered_sea_time is None:
+                self.entered_sea_time = self.current_time
+
+            relax_time = self.current_time - self.entered_sea_time
+
+            # przez 10–120 lat pozwalamy na boczne rozlewanie
+            if relax_time < 120:
+                self.k_mig *= 0.3
+            else:
+                return
+
 
         self.current_time += self.dt
         
         curvature = physics.compute_curvature(self.points)
+        curvature = physics.smooth_signal(curvature, k=7)
+
         w_curv = physics.compute_weighted_curvature(curvature, self.friction)
         nx, ny = physics.calculate_migration_vectors(self.points)
         
         migration_rate = self.width * self.k_mig * w_curv
-        
-        # Tłumienie migracji na końcach (zakotwiczenie)
+
+        if self.entered_sea_time is not None:
+            if self.current_time - self.entered_sea_time < 120:
+                migration_rate *= 1.3
+
         dampening = np.ones_like(migration_rate)
-        buffer = 15
-        
-        # Zawsze zerujemy początek - rzeka nie może oderwać się od rodzica
-        dampening[0] = 0.0 
-        
-        if len(dampening) > 2 * buffer:
-            dampening[:buffer] = 0.0 
-            dampening[-5:] = 0.0     
-            dampening[buffer:buffer+10] = np.linspace(0, 1, 10)
-        else:
-            safe_idx = min(len(dampening)-1, 5)
-            dampening[:safe_idx] = 0.0
+
+        buffer_up = 15
+        buffer_down = int(0.35 * len(self.points))
+
+
+
+        dampening[:buffer_up] = 0.0
+        dampening[-buffer_down:] = 0.0
+
 
         migration_rate *= dampening
 
@@ -132,20 +167,15 @@ class RiverChannel:
         tip = self.points[-1].copy()
         prev = self.points[-5]
         
-        # Aktualny kierunek przepływu na końcu rzeki
         current_dir = tip - prev
         current_dir /= (np.linalg.norm(current_dir) + 1e-6)
         
-        # ASYMETRYCZNY PODZIAŁ - WACHLARZ
-        # Kąt rozwarcia między gałęziami (30-60 stopni)
-        spread = np.radians(np.random.uniform(30, 60))
-        # Losowy przechył (żeby nie zawsze było symetrycznie względem środka)
+        spread = np.radians(np.random.uniform(12, 25))
         tilt = np.radians(np.random.uniform(-15, 15))
         
         theta_left = tilt + spread / 2.0
         theta_right = tilt - spread / 2.0
         
-        # Proporcje szerokości (np. 70% wody w lewo, 30% w prawo)
         ratio = np.random.uniform(0.3, 0.7)
         w_left = self.width * np.sqrt(ratio)
         w_right = self.width * np.sqrt(1.0 - ratio)
@@ -154,11 +184,9 @@ class RiverChannel:
             c, s = np.cos(angle), np.sin(angle)
             return np.array([vec[0]*c - vec[1]*s, vec[0]*s + vec[1]*c])
         
-        # Nowe kierunki generalne dla dzieci
         dir_left = rotate_vector(current_dir, theta_left)
         dir_right = rotate_vector(current_dir, theta_right)
         
-        # Punkty startowe (lekkie rozsunięcie)
         start_step = self.width * 0.2
         p2_l = tip + dir_left * start_step
         p2_r = tip + dir_right * start_step
@@ -169,11 +197,9 @@ class RiverChannel:
         ch_left = RiverChannel(pts_left, width=w_left, dt=self.dt, dx=self.dx, parent_id=self)
         ch_right = RiverChannel(pts_right, width=w_right, dt=self.dt, dx=self.dx, parent_id=self)
         
-        # PRZEKAZANIE KIERUNKÓW (kluczowe!)
         ch_left.general_direction = dir_left
         ch_right.general_direction = dir_right
         
-        # Mutacja parametrów (różnorodność)
         ch_left.k_mig = self.k_mig * np.random.uniform(0.8, 1.2)
         ch_right.k_mig = self.k_mig * np.random.uniform(0.8, 1.2)
         

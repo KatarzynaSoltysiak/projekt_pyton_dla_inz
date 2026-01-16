@@ -4,19 +4,17 @@ import matplotlib.pyplot as plt
 from model import RiverChannel
 import visualization
 import random
+import physics
+
 
 def main():
-    # 1. Start - Płaska linia na start, żeby nie robić pętli od razu
     length = 300
     num_points = 30
     x = np.linspace(0, length, num_points)
     y = np.sin(x / 150.0) * 5.0 
     
-    # 2. Inicjalizacja
-    # ZMIANA: width=100.0 (Było 50.0) -> Rzeka jest teraz 2x szersza
     initial_channel = RiverChannel(x, y, width=100.0, dt=0.5, dx=20.0)
     
-    # Lekko zwiększamy meandrowanie, bo szersza rzeka potrzebuje więcej energii
     initial_channel.k_mig = 1.2 
     
     all_channels = [initial_channel]
@@ -24,12 +22,10 @@ def main():
     plt.ion()
     fig, ax = visualization.init_plot()
     
-    # Parametry sterujące
-    delta_start_x = 400   # Rozgałęzienia zaczynają się wcześniej
+    delta_start_x = 400 
     map_limit_x = 3500    
     
-    # ZMIANA: max_branches=40 (Było 15) -> Więcej odnóg
-    max_branches = 40     
+    max_branches = 25     
     
     total_steps = 3000
     current_time = 0
@@ -47,7 +43,13 @@ def main():
                 break
 
             for channel in active_channels:
-                # A. WZROST
+                # Zanik słabych odnóg
+                if channel.width < 20 and len(channel.points) > 80:
+                    if random.random() < 0.01:
+                        channel.is_active = False
+                        continue
+
+                #WZROST
                 head_x = channel.points[-1, 0]
                 
                 if head_x < map_limit_x:
@@ -56,21 +58,36 @@ def main():
                     channel.is_active = False
                     continue 
                 
-                # B. MIGRACJA
+                #MIGRACJA
                 channel.migrate()
                 
-                # C. ROZGAŁĘZIANIE (AGRESYWNIEJSZE)
+                #ROZGAŁĘZIANIE
                 if (head_x > delta_start_x and len(all_channels) < max_branches):
                     
-                    # ZMIANA: Szansa 4% (Było 1.5%) -> Częstsze bifurkacje
-                    # ZMIANA: Wymagana długość > 20 (Było 40) -> Szybsze podziały
-                    if random.random() < 0.04:
+                    curv = np.abs(
+                        np.mean(
+                            physics.compute_curvature(channel.points[-30:])
+                        )
+                    )
+
+                    length_factor = min(1.0, len(channel.points) / 80)
+
+                    p_branch = (
+                        0.008 + 
+                        curv * 10 + 
+                        0.02 * length_factor
+                    )
+
+                    p_branch = min(p_branch, 0.035)
+
+                    if random.random() < p_branch:
+
+
                         if len(channel.points) > 20: 
                             new_branches = channel.branch()
                             all_channels.extend(new_branches)
                             print(f"[{current_time:.1f}] BIFURKACJA! (Kanałów: {len(all_channels)})")
             
-            # Wizualizacja co 5 kroków (płynniej widać zmiany)
             if step % 5 == 0:
                 visualization.update_plot_network(ax, all_channels, current_time)
                 plt.pause(0.001)
